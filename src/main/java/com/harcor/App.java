@@ -24,10 +24,19 @@ import org.apache.lucene.util.fst.ByteSequenceOutputs;
 import org.apache.lucene.util.fst.FST;
 import org.apache.lucene.util.fst.FSTCompiler;
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.StringReader;
+import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Lucene Text Tagger — three explicit steps:
@@ -420,13 +429,160 @@ public class App {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // Main
+    // TaggerServer  —  com.sun.net.httpserver HTTP wrapper
     // ═════════════════════════════════════════════════════════════════════════
 
-    public static void main(String[] args) throws Exception {
+    /**
+     * Minimal HTTP server built on the JDK's built-in com.sun.net.httpserver API.
+     *
+     * Endpoints
+     * ─────────
+     *   GET  /tag?text=...        tag URL-encoded text; returns JSON array
+     *   POST /tag                 body: {"text":"..."};  returns JSON array
+     *   GET  /health              returns {"status":"ok"}
+     *
+     * JSON response format
+     * ─────────────────────
+     *   [
+     *     {"start":0,"end":9,"surface":"Acme Corp","id":"org:acme","type":"ORG"},
+     *     ...
+     *   ]
+     *
+     * Usage
+     * ─────
+     *   java -jar target/tagger.jar serve [port]
+     *   PORT env var is also honoured (Replit / container convention).
+     */
+    static class TaggerServer {
 
-        // Phrase dictionary: { surface phrase, entity id, entity type }
-        List<String[]> phrases = List.of(
+        private static final Pattern JSON_TEXT =
+            Pattern.compile("\"text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+
+        private final HttpServer  server;
+        private final TextTagger  tagger;
+
+        TaggerServer(TextTagger tagger, int port) throws IOException {
+            this.tagger = tagger;
+            this.server = HttpServer.create(new InetSocketAddress(port), /*backlog=*/ 0);
+            this.server.setExecutor(Executors.newCachedThreadPool());
+            this.server.createContext("/tag",    this::handleTag);
+            this.server.createContext("/health", this::handleHealth);
+        }
+
+        void start() { server.start(); }
+        void stop()  { server.stop(0); }
+
+        // ── Handlers ─────────────────────────────────────────────────────────
+
+        /** GET /tag?text=... or POST /tag with JSON body {"text":"..."} */
+        private void handleTag(HttpExchange ex) throws IOException {
+            String method = ex.getRequestMethod();
+
+            String text;
+            if ("GET".equalsIgnoreCase(method)) {
+                text = queryParam(ex.getRequestURI().getRawQuery(), "text");
+            } else if ("POST".equalsIgnoreCase(method)) {
+                String body = readBody(ex);
+                text = jsonTextField(body);
+            } else {
+                respond(ex, 405, "application/json", "{\"error\":\"method not allowed\"}");
+                return;
+            }
+
+            if (text == null || text.isBlank()) {
+                respond(ex, 400, "application/json",
+                    "{\"error\":\"provide ?text= (GET) or {\\\"text\\\":\\\"...\\\"} (POST)\"}");
+                return;
+            }
+
+            List<Tag> tags = tagger.tag(text);
+            respond(ex, 200, "application/json", toJson(tags));
+        }
+
+        /** GET /health */
+        private void handleHealth(HttpExchange ex) throws IOException {
+            respond(ex, 200, "application/json", "{\"status\":\"ok\"}");
+        }
+
+        // ── Helpers ───────────────────────────────────────────────────────────
+
+        /** Read the full request body as a UTF-8 string. */
+        private static String readBody(HttpExchange ex) throws IOException {
+            try (InputStream in = ex.getRequestBody()) {
+                return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            }
+        }
+
+        /** Extract a single query-string parameter value (URL-decoded). */
+        private static String queryParam(String rawQuery, String name) {
+            if (rawQuery == null) return null;
+            for (String pair : rawQuery.split("&")) {
+                int eq = pair.indexOf('=');
+                if (eq < 0) continue;
+                String k = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
+                if (name.equals(k)) {
+                    return URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+                }
+            }
+            return null;
+        }
+
+        /** Extract the "text" field value from a JSON object string. */
+        private static String jsonTextField(String json) {
+            if (json == null) return null;
+            Matcher m = JSON_TEXT.matcher(json);
+            if (!m.find()) return null;
+            // Unescape basic JSON escape sequences
+            return m.group(1)
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\")
+                    .replace("\\n",  "\n")
+                    .replace("\\r",  "\r")
+                    .replace("\\t",  "\t");
+        }
+
+        /** Serialize a list of Tags to a JSON array. */
+        private static String toJson(List<Tag> tags) {
+            if (tags.isEmpty()) return "[]";
+            StringBuilder sb = new StringBuilder("[\n");
+            for (int i = 0; i < tags.size(); i++) {
+                Tag t = tags.get(i);
+                sb.append("  {")
+                  .append("\"start\":").append(t.start()).append(',')
+                  .append("\"end\":").append(t.end()).append(',')
+                  .append("\"surface\":\"").append(jsonEscape(t.surface())).append("\",")
+                  .append("\"id\":\"").append(jsonEscape(t.id())).append("\",")
+                  .append("\"type\":\"").append(jsonEscape(t.type())).append("\"")
+                  .append('}');
+                if (i < tags.size() - 1) sb.append(',');
+                sb.append('\n');
+            }
+            return sb.append(']').toString();
+        }
+
+        /** Escape a string for safe embedding inside a JSON double-quoted value. */
+        private static String jsonEscape(String s) {
+            return s.replace("\\", "\\\\").replace("\"", "\\\"")
+                    .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
+        }
+
+        /** Write a complete HTTP response and close the exchange. */
+        private static void respond(HttpExchange ex, int status,
+                                    String contentType, String body) throws IOException {
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", contentType + "; charset=utf-8");
+            ex.sendResponseHeaders(status, bytes.length);
+            try (var out = ex.getResponseBody()) { out.write(bytes); }
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Shared setup helpers
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /** Build the standard phrase dictionary used by both modes. */
+    static List<String[]> buildPhrases() {
+        return List.of(
             new String[]{ "New York City",    "geo:nyc",   "CITY"    },
             new String[]{ "New York",         "geo:nyc",   "CITY"    },
             new String[]{ "NYC",              "geo:nyc",   "CITY"    },
@@ -453,45 +609,91 @@ public class App {
             new String[]{ "Alan Turing",      "per:tur",   "PERSON"  },
             new String[]{ "Donald Knuth",     "per:knu",   "PERSON"  }
         );
+    }
 
-        String[] inputs = {
-            "Acme Corp uses Apache Lucene for search in New York City.",
-            "Ada Lovelace would have loved Kubernetes and Elasticsearch.",
-            "Google and Microsoft both operate in the United States and United Kingdom.",
-            "I flew from Zürich to Berlin — the conference is in Germany.",
-            "There is nothing to tag in this sentence about the weather.",
-        };
-
-        Analyzer analyzer = buildAnalyzer();
-
-        // Step 1: Create the index
+    /** Steps 1-3: create index, add phrases, compile FST → ready-to-use TextTagger. */
+    static TextTagger buildTagger(Analyzer analyzer) throws Exception {
         Directory dir = createIndex();
+        addData(dir, analyzer, buildPhrases());
+        return TextTagger.fromIndex(dir, analyzer);
+    }
 
-        // Step 2: Add data
-        addData(dir, analyzer, phrases);
+    // ═════════════════════════════════════════════════════════════════════════
+    // Main
+    // ═════════════════════════════════════════════════════════════════════════
 
-        // Step 3: Compile FST from index, then tag
-        TextTagger tagger = TextTagger.fromIndex(dir, analyzer);
+    public static void main(String[] args) throws Exception {
 
-        System.out.println("Step 3b: Tagging sentences with TextTagger (FST arc walk)");
-        System.out.println("         (forward maximum match — longest phrase wins)\n");
+        boolean serveMode = args.length > 0 && args[0].equals("serve");
 
-        for (String input : inputs) {
-            System.out.println("  INPUT : " + input);
-            List<Tag> tags = tagger.tag(input);
-
-            if (tags.isEmpty()) {
-                System.out.println("  TAGS  : (none)\n");
+        if (serveMode) {
+            // ── HTTP server mode ─────────────────────────────────────────────
+            // Port: first try command-line arg, then PORT env var, then default 8080
+            int port = 8080;
+            if (args.length > 1) {
+                port = Integer.parseInt(args[1]);
             } else {
-                for (Tag t : tags) {
-                    System.out.printf("  TAG   : [%d-%d] \"%-20s\" id=%-12s type=%s%n",
-                        t.start(), t.end(), t.surface(), t.id(), t.type());
-                }
-                System.out.println();
+                String envPort = System.getenv("PORT");
+                if (envPort != null && !envPort.isBlank()) port = Integer.parseInt(envPort);
             }
-        }
 
-        dir.close();
-        analyzer.close();
+            System.out.println("Building tagger …");
+            Analyzer   analyzer = buildAnalyzer();
+            TextTagger tagger   = buildTagger(analyzer);
+
+            TaggerServer srv = new TaggerServer(tagger, port);
+            srv.start();
+
+            System.out.println("Tagger HTTP server listening on port " + port);
+            System.out.println("  GET  http://localhost:" + port + "/tag?text=Ada+Lovelace+loves+Lucene");
+            System.out.println("  POST http://localhost:" + port + "/tag   body: {\"text\":\"Ada Lovelace loves Lucene\"}");
+            System.out.println("  GET  http://localhost:" + port + "/health");
+            System.out.println("Press Ctrl-C to stop.");
+
+            // Keep the main thread alive
+            Thread.currentThread().join();
+
+        } else {
+            // ── Demo mode ────────────────────────────────────────────────────
+            Analyzer analyzer = buildAnalyzer();
+
+            // Step 1: Create the index
+            Directory dir = createIndex();
+
+            // Step 2: Add data
+            addData(dir, analyzer, buildPhrases());
+
+            // Step 3: Compile FST from index, then tag
+            TextTagger tagger = TextTagger.fromIndex(dir, analyzer);
+
+            String[] inputs = {
+                "Acme Corp uses Apache Lucene for search in New York City.",
+                "Ada Lovelace would have loved Kubernetes and Elasticsearch.",
+                "Google and Microsoft both operate in the United States and United Kingdom.",
+                "I flew from Zürich to Berlin — the conference is in Germany.",
+                "There is nothing to tag in this sentence about the weather.",
+            };
+
+            System.out.println("Step 3b: Tagging sentences with TextTagger (FST arc walk)");
+            System.out.println("         (forward maximum match — longest phrase wins)\n");
+
+            for (String input : inputs) {
+                System.out.println("  INPUT : " + input);
+                List<Tag> tags = tagger.tag(input);
+
+                if (tags.isEmpty()) {
+                    System.out.println("  TAGS  : (none)\n");
+                } else {
+                    for (Tag t : tags) {
+                        System.out.printf("  TAG   : [%d-%d] \"%-20s\" id=%-12s type=%s%n",
+                            t.start(), t.end(), t.surface(), t.id(), t.type());
+                    }
+                    System.out.println();
+                }
+            }
+
+            dir.close();
+            analyzer.close();
+        }
     }
 }
