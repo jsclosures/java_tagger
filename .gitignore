@@ -1,2 +1,2 @@
 *.class
-target/:wq
+target/*
