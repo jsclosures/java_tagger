@@ -1,0 +1,5 @@
+name,alias,sku
+Apache Lucene,Lucene,sw-lucene
+Apache Solr,Solr,sw-solr
+Elasticsearch,ES,sw-es
+Kubernetes,k8s,sw-k8s

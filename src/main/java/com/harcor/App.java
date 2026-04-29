@@ -33,6 +33,9 @@ import java.io.StringReader;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
@@ -611,10 +614,117 @@ public class App {
         );
     }
 
+    /**
+     * Optionally loads CSV files into an existing Lucene index.
+     *
+     * <p>Reads the {@code DATA} environment variable for a directory path.
+     * Every {@code *.csv} file found there is processed in alphabetical order.
+     * The first row of each file is treated as a header; every subsequent row
+     * produces one Lucene document per column:
+     *
+     * <ul>
+     *   <li>{@link #F_TEXT}  = cell value (blank cells are skipped)</li>
+     *   <li>{@link #F_ID}    = {@code <rowUUID>-<columnName>}</li>
+     *   <li>{@link #F_TYPE}  = file name without the {@code .csv} extension</li>
+     * </ul>
+     *
+     * <p>If {@code DATA} is unset or blank the method returns immediately without
+     * touching the index.  Uses {@link IndexWriterConfig.OpenMode#CREATE_OR_APPEND}
+     * so it appends after any documents already written by {@link #addData}.
+     */
+    static void loadCsvData(Directory dir, Analyzer analyzer) throws IOException {
+        String dataEnv = System.getenv("DATA");
+        if (dataEnv == null || dataEnv.isBlank()) {
+            System.out.println("        DATA env var not set — skipping CSV load\n");
+            return;
+        }
+
+        Path dataDir = Paths.get(dataEnv);
+        if (!Files.isDirectory(dataDir)) {
+            throw new IllegalArgumentException("DATA path does not exist or is not a directory: " + dataDir);
+        }
+
+        // Collect *.csv files, sorted alphabetically for deterministic order
+        List<Path> csvFiles;
+        try (var stream = Files.list(dataDir)) {
+            csvFiles = stream
+                .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".csv"))
+                .sorted(Comparator.comparing(p -> p.getFileName().toString().toLowerCase()))
+                .toList();
+        }
+
+        if (csvFiles.isEmpty()) {
+            System.out.println("        No .csv files found in " + dataDir + " — skipping CSV load\n");
+            return;
+        }
+
+        System.out.println("Step 2b: Loading CSV data from " + dataDir);
+
+        IndexWriterConfig cfg = new IndexWriterConfig(analyzer);
+        cfg.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
+
+        int totalDocs = 0;
+
+        try (IndexWriter writer = new IndexWriter(dir, cfg)) {
+            for (Path csvFile : csvFiles) {
+                // F_TYPE = filename without extension
+                String fileName = csvFile.getFileName().toString();
+                String typeLabel = fileName.substring(0, fileName.length() - 4);
+
+                List<String> lines = Files.readAllLines(csvFile, StandardCharsets.UTF_8);
+                if (lines.isEmpty()) continue;
+
+                // First line is the header
+                String[] headers = splitCsv(lines.get(0));
+                int fileDocs = 0;
+
+                for (int rowIdx = 1; rowIdx < lines.size(); rowIdx++) {
+                    String line = lines.get(rowIdx).trim();
+                    if (line.isEmpty()) continue;
+
+                    String[] cells = splitCsv(line);
+                    // One UUID per row — all columns of this row share it
+                    String rowUuid = UUID.randomUUID().toString();
+
+                    for (int col = 0; col < headers.length; col++) {
+                        String colName  = headers[col].trim();
+                        String cellValue = col < cells.length ? cells[col].trim() : "";
+
+                        if (cellValue.isEmpty()) continue;  // skip blank cells
+
+                        Document doc = new Document();
+                        doc.add(new TextField(F_TEXT, cellValue,  Field.Store.YES));
+                        doc.add(new StoredField(F_ID,  rowUuid + "-" + colName));
+                        doc.add(new StoredField(F_TYPE, typeLabel));
+                        writer.addDocument(doc);
+                        fileDocs++;
+                    }
+                }
+
+                System.out.println("         " + fileName + " → " + fileDocs + " documents (type=" + typeLabel + ")");
+                totalDocs += fileDocs;
+            }
+            writer.commit();
+        }
+
+        System.out.println("         CSV load total: " + totalDocs + " document(s) from "
+                + csvFiles.size() + " file(s) in " + dataDir + "\n");
+    }
+
+    /**
+     * Minimal RFC-4180-compatible CSV line splitter.
+     * Splits on commas, trims whitespace, does not handle quoted fields
+     * containing embedded commas (sufficient for the plain-text use case).
+     */
+    private static String[] splitCsv(String line) {
+        return line.split(",", -1);
+    }
+
     /** Steps 1-3: create index, add phrases, compile FST → ready-to-use TextTagger. */
     static TextTagger buildTagger(Analyzer analyzer) throws Exception {
         Directory dir = createIndex();
         addData(dir, analyzer, buildPhrases());
+        loadCsvData(dir, analyzer);
         return TextTagger.fromIndex(dir, analyzer);
     }
 
@@ -662,6 +772,9 @@ public class App {
 
             // Step 2: Add data
             addData(dir, analyzer, buildPhrases());
+
+            // Step 2b: Optionally load CSV data (DATA env var)
+            loadCsvData(dir, analyzer);
 
             // Step 3: Compile FST from index, then tag
             TextTagger tagger = TextTagger.fromIndex(dir, analyzer);
