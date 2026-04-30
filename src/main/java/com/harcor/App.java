@@ -660,18 +660,21 @@ public class App {
      *
      * <p>Reads the {@code DATA} environment variable for a directory path.
      * Every {@code *.csv} file found there is processed in alphabetical order.
-     * The first row of each file is treated as a header; every subsequent row
-     * produces one Lucene document per column:
+     * The first row of each file is the header; one Lucene document is written
+     * per data row:
      *
      * <ul>
-     *   <li>{@link #F_TEXT}  = cell value (blank cells are skipped)</li>
-     *   <li>{@link #F_ID}    = {@code <rowUUID>-<columnName>}</li>
-     *   <li>{@link #F_TYPE}  = file name without the {@code .csv} extension</li>
+     *   <li>{@link #F_TEXT}   = value of the first column (the phrase to match)</li>
+     *   <li>{@link #F_ID}     = random UUID for the row</li>
+     *   <li>{@link #F_TYPE}   = file name without the {@code .csv} extension</li>
+     *   <li>{@link #F_OUTPUT} = value of the {@code action} column if present,
+     *                           otherwise {@link #deriveOutput(String)} of F_TEXT</li>
      * </ul>
      *
-     * <p>If {@code DATA} is unset or blank the method returns immediately without
-     * touching the index.  Uses {@link IndexWriterConfig.OpenMode#CREATE_OR_APPEND}
-     * so it appends after any documents already written by {@link #addData}.
+     * <p>Rows whose first-column value is blank are skipped.
+     * If {@code DATA} is unset or blank the method returns immediately.
+     * Uses {@link IndexWriterConfig.OpenMode#CREATE_OR_APPEND} so documents are
+     * appended after those written by {@link #addData}.
      */
     static void loadCsvData(Directory dir, Analyzer analyzer) throws IOException {
         String dataEnv = System.getenv("DATA");
@@ -682,7 +685,8 @@ public class App {
 
         Path dataDir = Paths.get(dataEnv);
         if (!Files.isDirectory(dataDir)) {
-            throw new IllegalArgumentException("DATA path does not exist or is not a directory: " + dataDir);
+            throw new IllegalArgumentException(
+                "DATA path does not exist or is not a directory: " + dataDir);
         }
 
         // Collect *.csv files, sorted alphabetically for deterministic order
@@ -695,7 +699,8 @@ public class App {
         }
 
         if (csvFiles.isEmpty()) {
-            System.out.println("        No .csv files found in " + dataDir + " — skipping CSV load\n");
+            System.out.println("        No .csv files found in " + dataDir
+                + " — skipping CSV load\n");
             return;
         }
 
@@ -708,72 +713,63 @@ public class App {
 
         try (IndexWriter writer = new IndexWriter(dir, cfg)) {
             for (Path csvFile : csvFiles) {
-                // F_TYPE = filename without extension
-                String fileName = csvFile.getFileName().toString();
+                String fileName  = csvFile.getFileName().toString();
                 String typeLabel = fileName.substring(0, fileName.length() - 4);
 
                 List<String> lines = Files.readAllLines(csvFile, StandardCharsets.UTF_8);
                 if (lines.isEmpty()) continue;
 
-                // First line is the header; detect optional "action" column
-                String[] headers = splitCsv(lines.get(0));
-                int actionColIdx = -1;
+                // First line is the header; locate optional "action" column
+                String[] headers     = splitCsv(lines.get(0));
+                int      actionColIdx = -1;
                 for (int h = 0; h < headers.length; h++) {
                     if ("action".equalsIgnoreCase(headers[h].trim())) {
                         actionColIdx = h;
                         break;
                     }
                 }
-                int fileDocs = 0;
 
+                int fileDocs = 0;
                 for (int rowIdx = 1; rowIdx < lines.size(); rowIdx++) {
                     String line = lines.get(rowIdx).trim();
                     if (line.isEmpty()) continue;
 
                     String[] cells = splitCsv(line);
-                    // One UUID per row — all columns of this row share it
-                    String rowUuid = UUID.randomUUID().toString();
 
-                    // Resolve row-level action value (may be null if no action column)
-                    String rowAction = null;
+                    // First column is the phrase to index
+                    String phrase = cells.length > 0 ? cells[0].trim() : "";
+                    if (phrase.isEmpty()) continue;   // skip blank rows
+
+                    // output: action column value if present, else derive from phrase
+                    String output = deriveOutput(phrase);
                     if (actionColIdx >= 0 && actionColIdx < cells.length) {
                         String v = cells[actionColIdx].trim();
-                        if (!v.isEmpty()) rowAction = v;
+                        if (!v.isEmpty()) output = v;
                     }
 
-                    for (int col = 0; col < headers.length; col++) {
-                        String colName   = headers[col].trim();
-                        String cellValue = col < cells.length ? cells[col].trim() : "";
-
-                        if (cellValue.isEmpty()) continue;  // skip blank cells
-
-                        // output: action column value if present, else derive from cell
-                        String output = rowAction != null ? rowAction : deriveOutput(cellValue);
-
-                        Document doc = new Document();
-                        doc.add(new TextField(F_TEXT,    cellValue, Field.Store.YES));
-                        doc.add(new StoredField(F_ID,    rowUuid + "-" + colName));
-                        doc.add(new StoredField(F_TYPE,  typeLabel));
-                        doc.add(new StoredField(F_OUTPUT, output));
-                        writer.addDocument(doc);
-                        fileDocs++;
-                    }
+                    Document doc = new Document();
+                    doc.add(new TextField(F_TEXT,    phrase,                    Field.Store.YES));
+                    doc.add(new StoredField(F_ID,    UUID.randomUUID().toString()));
+                    doc.add(new StoredField(F_TYPE,  typeLabel));
+                    doc.add(new StoredField(F_OUTPUT, output));
+                    writer.addDocument(doc);
+                    fileDocs++;
                 }
 
-                System.out.println("         " + fileName + " → " + fileDocs + " documents (type=" + typeLabel + ")");
+                System.out.println("         " + fileName
+                    + " → " + fileDocs + " document(s) (type=" + typeLabel + ")");
                 totalDocs += fileDocs;
             }
             writer.commit();
         }
 
         System.out.println("         CSV load total: " + totalDocs + " document(s) from "
-                + csvFiles.size() + " file(s) in " + dataDir + "\n");
+            + csvFiles.size() + " file(s) in " + dataDir + "\n");
     }
 
     /**
-     * Minimal RFC-4180-compatible CSV line splitter.
-     * Splits on commas, trims whitespace, does not handle quoted fields
-     * containing embedded commas (sufficient for the plain-text use case).
+     * Minimal CSV line splitter: splits on commas, returns raw tokens
+     * (callers trim as needed).
      */
     private static String[] splitCsv(String line) {
         return line.split(",", -1);
