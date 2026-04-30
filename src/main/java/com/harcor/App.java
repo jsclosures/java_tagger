@@ -57,9 +57,10 @@ import java.util.regex.Pattern;
 public class App {
 
     // ── Lucene index field names ─────────────────────────────────────────────
-    static final String F_TEXT = "phrase";   // analyzed TextField (stored for re-reading)
-    static final String F_ID   = "id";       // stored entity identifier
-    static final String F_TYPE = "type";     // stored entity type label
+    static final String F_TEXT   = "phrase";   // analyzed TextField (stored for re-reading)
+    static final String F_ID     = "id";       // stored entity identifier
+    static final String F_TYPE   = "type";     // stored entity type label
+    static final String F_OUTPUT = "output";   // semantic output token returned in results
 
     // ── Analyzer ─────────────────────────────────────────────────────────────
     // Must be IDENTICAL at index time and at tag time — otherwise FST keys
@@ -88,6 +89,15 @@ public class App {
             stream.end();
         }
         return out;
+    }
+
+    /**
+     * Derive the output token from a phrase: uppercase every character then
+     * strip everything that is not A-Z or 0-9.
+     * <p>Examples: "New York City" → "NEWYORKCITY", "f*ck" → "FCK"
+     */
+    static String deriveOutput(String phrase) {
+        return phrase.toUpperCase().replaceAll("[^A-Z0-9]", "");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -128,9 +138,10 @@ public class App {
         try (IndexWriter writer = new IndexWriter(dir, cfg)) {
             for (String[] row : phrases) {
                 Document doc = new Document();
-                doc.add(new TextField(F_TEXT, row[0], Field.Store.YES));
-                doc.add(new StoredField(F_ID,   row[1]));
-                doc.add(new StoredField(F_TYPE, row[2]));
+                doc.add(new TextField(F_TEXT,   row[0], Field.Store.YES));
+                doc.add(new StoredField(F_ID,    row[1]));
+                doc.add(new StoredField(F_TYPE,  row[2]));
+                doc.add(new StoredField(F_OUTPUT, deriveOutput(row[0])));
                 writer.addDocument(doc);
             }
             writer.commit();
@@ -144,7 +155,7 @@ public class App {
     // ═════════════════════════════════════════════════════════════════════════
 
     /** A matched entity span in the original input text. */
-    record Tag(int start, int end, String surface, String id, String type) {}
+    record Tag(int start, int end, String surface, String id, String type, String output) {}
 
     /**
      * TextTagger compiles the phrase dictionary into a Lucene FST
@@ -288,7 +299,9 @@ public class App {
                     String   phrase = doc.get(F_TEXT);
                     String   id     = doc.get(F_ID);
                     String   type   = doc.get(F_TYPE);
+                    String   output = doc.get(F_OUTPUT);
                     if (phrase == null || phrase.isBlank()) continue;
+                    if (output == null) output = deriveOutput(phrase);
 
                     // Pipe the phrase through the analyzer + ConcatenateGraphFilter.
                     // This produces the canonical FST key bytes with 0x1E separators —
@@ -297,7 +310,7 @@ public class App {
                     if (key == null || key.length == 0) continue;
 
                     sortedDict.computeIfAbsent(key, k -> new LinkedHashSet<>())
-                              .add(id + "\t" + type);   // Set deduplicates same id+type
+                              .add(id + "\t" + type + "\t" + output);  // Set deduplicates same record
                 }
             }
 
@@ -413,12 +426,13 @@ public class App {
                     int    end     = offsets.get(matchEndJ)[1];
                     String surface = text.substring(start, end);
 
-                    // Decode: "id₁\ttype₁\nid₂\ttype₂\n…"
+                    // Decode: "id₁\ttype₁\toutput₁\nid₂\ttype₂\toutput₂\n…"
                     String combined = new String(
                         matchOut.bytes, matchOut.offset, matchOut.length, StandardCharsets.UTF_8);
                     for (String record : combined.split("\n")) {
-                        String[] fields = record.split("\t", 2);
-                        results.add(new Tag(start, end, surface, fields[0], fields[1]));
+                        String[] fields = record.split("\t", 3);
+                        String output = fields.length > 2 ? fields[2] : deriveOutput(surface);
+                        results.add(new Tag(start, end, surface, fields[0], fields[1], output));
                     }
 
                     i = matchEndJ + 1;   // advance cursor past the matched span
@@ -555,7 +569,8 @@ public class App {
                   .append("\"end\":").append(t.end()).append(',')
                   .append("\"surface\":\"").append(jsonEscape(t.surface())).append("\",")
                   .append("\"id\":\"").append(jsonEscape(t.id())).append("\",")
-                  .append("\"type\":\"").append(jsonEscape(t.type())).append("\"")
+                  .append("\"type\":\"").append(jsonEscape(t.type())).append("\",")
+                  .append("\"output\":\"").append(jsonEscape(t.output())).append("\"")
                   .append('}');
                 if (i < tags.size() - 1) sb.append(',');
                 sb.append('\n');
@@ -674,8 +689,15 @@ public class App {
                 List<String> lines = Files.readAllLines(csvFile, StandardCharsets.UTF_8);
                 if (lines.isEmpty()) continue;
 
-                // First line is the header
+                // First line is the header; detect optional "action" column
                 String[] headers = splitCsv(lines.get(0));
+                int actionColIdx = -1;
+                for (int h = 0; h < headers.length; h++) {
+                    if ("action".equalsIgnoreCase(headers[h].trim())) {
+                        actionColIdx = h;
+                        break;
+                    }
+                }
                 int fileDocs = 0;
 
                 for (int rowIdx = 1; rowIdx < lines.size(); rowIdx++) {
@@ -686,16 +708,27 @@ public class App {
                     // One UUID per row — all columns of this row share it
                     String rowUuid = UUID.randomUUID().toString();
 
+                    // Resolve row-level action value (may be null if no action column)
+                    String rowAction = null;
+                    if (actionColIdx >= 0 && actionColIdx < cells.length) {
+                        String v = cells[actionColIdx].trim();
+                        if (!v.isEmpty()) rowAction = v;
+                    }
+
                     for (int col = 0; col < headers.length; col++) {
-                        String colName  = headers[col].trim();
+                        String colName   = headers[col].trim();
                         String cellValue = col < cells.length ? cells[col].trim() : "";
 
                         if (cellValue.isEmpty()) continue;  // skip blank cells
 
+                        // output: action column value if present, else derive from cell
+                        String output = rowAction != null ? rowAction : deriveOutput(cellValue);
+
                         Document doc = new Document();
-                        doc.add(new TextField(F_TEXT, cellValue,  Field.Store.YES));
-                        doc.add(new StoredField(F_ID,  rowUuid + "-" + colName));
-                        doc.add(new StoredField(F_TYPE, typeLabel));
+                        doc.add(new TextField(F_TEXT,    cellValue, Field.Store.YES));
+                        doc.add(new StoredField(F_ID,    rowUuid + "-" + colName));
+                        doc.add(new StoredField(F_TYPE,  typeLabel));
+                        doc.add(new StoredField(F_OUTPUT, output));
                         writer.addDocument(doc);
                         fileDocs++;
                     }
@@ -798,8 +831,8 @@ public class App {
                     System.out.println("  TAGS  : (none)\n");
                 } else {
                     for (Tag t : tags) {
-                        System.out.printf("  TAG   : [%d-%d] \"%-20s\" id=%-12s type=%s%n",
-                            t.start(), t.end(), t.surface(), t.id(), t.type());
+                        System.out.printf("  TAG   : [%d-%d] \"%-20s\" id=%-12s type=%-10s output=%s%n",
+                            t.start(), t.end(), t.surface(), t.id(), t.type(), t.output());
                     }
                     System.out.println();
                 }

@@ -2,3 +2,168 @@ intent,action,response
 view,VIEW,Viewing
 find,FIND,Finding
 buy,BUY,Buying
+search for a part,SEARCH,Searching
+look up a part,SEARCH,Searching
+part lookup,SEARCH,Searching
+search parts,SEARCH,Searching
+find part by number,SEARCH,Searching
+look for parts,SEARCH,Searching
+part search,SEARCH,Searching
+search by serial number,SEARCH,Searching
+search by model,SEARCH,Searching
+find replacement part,SEARCH,Searching
+price,PRICE,Pricing
+cost,PRICE,Pricing
+how much does it cost,PRICE,Pricing
+get a quote,PRICE,Pricing
+what is the price,PRICE,Pricing
+pricing information,PRICE,Pricing
+quote,PRICE,Pricing
+how much is it,PRICE,Pricing
+give me a price,PRICE,Pricing
+request a quote,PRICE,Pricing
+availability,AVAILABILITY,Checking
+in stock,AVAILABILITY,Checking
+check stock,AVAILABILITY,Checking
+is it available,AVAILABILITY,Checking
+stock availability,AVAILABILITY,Checking
+when will it be available,AVAILABILITY,Checking
+do you have it in stock,AVAILABILITY,Checking
+check availability,AVAILABILITY,Checking
+is this part available,AVAILABILITY,Checking
+order,ORDER,Ordering
+purchase,ORDER,Ordering
+place an order,ORDER,Ordering
+order parts,ORDER,Ordering
+checkout,ORDER,Ordering
+I want to order,ORDER,Ordering
+submit order,ORDER,Ordering
+order now,ORDER,Ordering
+I want to purchase,ORDER,Ordering
+order status,STATUS,Tracking
+track my order,STATUS,Tracking
+where is my order,STATUS,Tracking
+delivery status,STATUS,Tracking
+shipping status,STATUS,Tracking
+when will my order arrive,STATUS,Tracking
+track shipment,STATUS,Tracking
+has my order shipped,STATUS,Tracking
+check my order,STATUS,Tracking
+order tracking,STATUS,Tracking
+compatible parts,COMPATIBLE,Matching
+what parts fit my machine,COMPATIBLE,Matching
+cross reference,COMPATIBLE,Matching
+interchange,COMPATIBLE,Matching
+will this fit,COMPATIBLE,Matching
+parts for my model,COMPATIBLE,Matching
+fitment,COMPATIBLE,Matching
+does this part fit,COMPATIBLE,Matching
+what is compatible,COMPATIBLE,Matching
+parts that fit my excavator,COMPATIBLE,Matching
+parts that fit my dozer,COMPATIBLE,Matching
+parts for my wheel loader,COMPATIBLE,Matching
+parts for my motor grader,COMPATIBLE,Matching
+parts for my skid steer,COMPATIBLE,Matching
+find a dealer,DEALER,Locating
+nearest dealer,DEALER,Locating
+dealer near me,DEALER,Locating
+where to buy,DEALER,Locating
+dealer locator,DEALER,Locating
+local dealer,DEALER,Locating
+CAT dealer,DEALER,Locating
+find a CAT dealer,DEALER,Locating
+authorized dealer,DEALER,Locating
+where can I buy this,DEALER,Locating
+specifications,SPECS,Fetching
+specs,SPECS,Fetching
+technical data,SPECS,Fetching
+part dimensions,SPECS,Fetching
+technical specifications,SPECS,Fetching
+what are the specs,SPECS,Fetching
+dimension,SPECS,Fetching
+weight,SPECS,Fetching
+torque spec,SPECS,Fetching
+pressure rating,SPECS,Fetching
+flow rate,SPECS,Fetching
+service manual,MANUAL,Retrieving
+operators manual,MANUAL,Retrieving
+parts manual,MANUAL,Retrieving
+documentation,MANUAL,Retrieving
+download manual,MANUAL,Retrieving
+operation guide,MANUAL,Retrieving
+owner manual,MANUAL,Retrieving
+repair manual,MANUAL,Retrieving
+maintenance manual,MANUAL,Retrieving
+wiring diagram,MANUAL,Retrieving
+warranty,WARRANTY,Verifying
+warranty information,WARRANTY,Verifying
+is it under warranty,WARRANTY,Verifying
+warranty claim,WARRANTY,Verifying
+warranty coverage,WARRANTY,Verifying
+how long is the warranty,WARRANTY,Verifying
+file a warranty claim,WARRANTY,Verifying
+warranty period,WARRANTY,Verifying
+return,RETURN,Returning
+refund,RETURN,Returning
+exchange,RETURN,Returning
+return a part,RETURN,Returning
+return policy,RETURN,Returning
+send it back,RETURN,Returning
+I want to return this,RETURN,Returning
+how do I return a part,RETURN,Returning
+wrong part,RETURN,Returning
+how to install,INSTALL,Installing
+installation instructions,INSTALL,Installing
+install guide,INSTALL,Installing
+fitting instructions,INSTALL,Installing
+how to replace,INSTALL,Installing
+installation help,INSTALL,Installing
+how do I install,INSTALL,Installing
+install a filter,INSTALL,Installing
+replace a belt,INSTALL,Installing
+service parts,SERVICE,Servicing
+maintenance parts,SERVICE,Servicing
+service interval,SERVICE,Servicing
+filter change,SERVICE,Servicing
+oil change parts,SERVICE,Servicing
+maintenance schedule,SERVICE,Servicing
+service kit,SERVICE,Servicing
+PM kit,SERVICE,Servicing
+preventive maintenance,SERVICE,Servicing
+scheduled maintenance,SERVICE,Servicing
+fluid specifications,SERVICE,Servicing
+lube chart,SERVICE,Servicing
+catalog,CATALOG,Browsing
+browse parts,CATALOG,Browsing
+parts catalog,CATALOG,Browsing
+browse catalog,CATALOG,Browsing
+show all parts,CATALOG,Browsing
+show categories,CATALOG,Browsing
+what parts do you carry,CATALOG,Browsing
+engine parts,CATALOG,Browsing
+hydraulic parts,CATALOG,Browsing
+undercarriage parts,CATALOG,Browsing
+ground engaging tools,CATALOG,Browsing
+filters,CATALOG,Browsing
+add to cart,CART,Managing
+my cart,CART,Managing
+shopping cart,CART,Managing
+view cart,CART,Managing
+remove from cart,CART,Managing
+update cart,CART,Managing
+cart total,CART,Managing
+clear cart,CART,Managing
+compare parts,COMPARE,Comparing
+compare,COMPARE,Comparing
+side by side,COMPARE,Comparing
+which is better,COMPARE,Comparing
+difference between,COMPARE,Comparing
+OEM vs aftermarket,COMPARE,Comparing
+compare prices,COMPARE,Comparing
+what part is this,IDENTIFY,Identifying
+identify part,IDENTIFY,Identifying
+part identification,IDENTIFY,Identifying
+identify by picture,IDENTIFY,Identifying
+what part number is this,IDENTIFY,Identifying
+I have a part but no number,IDENTIFY,Identifying
+unknown part,IDENTIFY,Identifying
