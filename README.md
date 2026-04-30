@@ -98,6 +98,57 @@ java -jar target/tagger.jar repl
 
 Type sentences at the `>` prompt. Commands: `dict`, `help`, `quit`.
 
+## Docker
+
+### Quick start
+
+```bash
+cd java-tagger-demo
+docker build -t lucene-tagger .
+docker run --rm -p 8080:8080 lucene-tagger
+```
+
+The bundled `data/` files are loaded automatically. Then:
+
+```bash
+curl "http://localhost:8080/tag?text=I+want+to+track+my+order"
+curl "http://localhost:8080/health"
+```
+
+### With Docker Compose
+
+```bash
+docker compose up
+```
+
+### Custom CSV data
+
+Mount your own directory of CSV files over `/data` and point `DATA` at it:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -v /path/to/my/csvs:/data \
+  -e DATA=/data \
+  lucene-tagger
+```
+
+Or uncomment the `volumes` block in `docker-compose.yml`.
+
+### Changing the port
+
+```bash
+docker run --rm -p 9000:9000 -e PORT=9000 lucene-tagger
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `8080` | Port the HTTP server listens on |
+| `DATA` | `/app/data` | Directory of `.csv` files to load at startup |
+
+---
+
 ## CSV data loading
 
 Set the `DATA` environment variable to a directory containing `.csv` files to
@@ -106,64 +157,56 @@ extend the built-in dictionary at startup.  No code changes needed.
 ### How it works
 
 - Every `*.csv` file in the directory is processed **alphabetically**.
-- The **first row** is the column header; every subsequent row is a data row.
-- For each data row a single UUID is generated.  For **each column** in that
-  row, one Lucene document is written to the index:
+- The **first row** is the column header; every subsequent row becomes
+  **one Lucene document** (one document per row, not per column):
 
   | Field | Value |
   |-------|-------|
-  | `phrase` (`F_TEXT`) | cell value (blank cells are silently skipped) |
-  | `id` (`F_ID`) | `<row-uuid>-<columnName>` |
+  | `phrase` (`F_TEXT`) | first column value (blank rows are skipped) |
+  | `id` (`F_ID`) | random UUID |
   | `type` (`F_TYPE`) | file name without the `.csv` extension |
+  | `output` (`F_OUTPUT`) | `action` column value if present, else derived from phrase |
 
 - Documents are appended after the built-in phrases; the FST is compiled once
   from the combined index.
 
 ### Example CSV files (`data/`)
 
-**`data/intent.csv`**
+**`data/intent.csv`** — 168 rows → 168 documents (`type=intent`)
 
 ```
 intent,action,response
-view,VIEW,Viewing
-find,FIND,Finding
+track my order,STATUS,Checking order status
+check availability,AVAILABILITY,Checking stock
 buy,BUY,Buying
 ```
 
-Produces 9 documents (`type=intent`) — one per cell.
+The `action` column is used as `output`; `response` and any other columns are ignored.
 
-**`data/product.csv`**
+**`data/machine_families.csv`** — 273 rows → 273 documents (`type=machine_families`)
 
 ```
-name,alias,sku
-Apache Lucene,Lucene,sw-lucene
-Apache Solr,Solr,sw-solr
-Elasticsearch,ES,sw-es
-Kubernetes,k8s,sw-k8s
+machine_family
+ARTICULATED TRUCK
+BACKHOE LOADER
+MOTOR GRADER
 ```
 
-Produces 12 documents (`type=product`).
+No `action` column — `output` is derived from the phrase (uppercased, non-alphanumeric stripped).
 
 ### Tag response with CSV data loaded
 
 ```bash
 DATA=data java -jar target/tagger.jar serve 8080
-curl -s "http://localhost:8080/tag?text=I+want+to+find+Lucene+and+buy+Solr"
+curl -s "http://localhost:8080/tag?text=I+want+to+track+my+order+and+check+availability"
 ```
 
 ```json
 [
-  {"start":10,"end":14,"surface":"find","id":"<uuid>-intent","type":"intent"},
-  {"start":10,"end":14,"surface":"find","id":"<uuid>-action","type":"intent"},
-  {"start":15,"end":21,"surface":"Lucene","id":"sw:lucene","type":"PRODUCT"},
-  {"start":15,"end":21,"surface":"Lucene","id":"<uuid>-alias","type":"product"},
-  {"start":26,"end":29,"surface":"buy","id":"<uuid>-intent","type":"intent"},
-  {"start":30,"end":34,"surface":"Solr","id":"<uuid>-alias","type":"product"}
+  {"start":10,"end":24,"surface":"track my order","id":"<uuid>","type":"intent","output":"STATUS"},
+  {"start":29,"end":47,"surface":"check availability","id":"<uuid>","type":"intent","output":"AVAILABILITY"}
 ]
 ```
-
-Multiple tags for the same span are normal when a cell value appears in more
-than one column or matches both a hard-coded entry and a CSV entry.
 
 ### Error handling
 
@@ -172,7 +215,7 @@ than one column or matches both a hard-coded entry and a CSV entry.
 | `DATA` not set | Silent skip; built-in phrases only |
 | `DATA` path does not exist | `IllegalArgumentException` at startup |
 | Empty directory or no `*.csv` files | Silent skip with one log line |
-| Blank cell | Document skipped; no empty-phrase entry written |
+| Blank first column | Row skipped; no empty-phrase entry written |
 
 ---
 

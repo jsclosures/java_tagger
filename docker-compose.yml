@@ -1,0 +1,19 @@
+services:
+  tagger:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      # DATA points to the bundled sample CSV files inside the image.
+      # To use your own CSVs, comment out the line above, uncomment the
+      # volume below, and set DATA to /data.
+      DATA: "/app/data"
+    # volumes:
+    #   - ./my-custom-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

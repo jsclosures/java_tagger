@@ -538,8 +538,10 @@ public class App {
                 return;
             }
 
+            long start    = System.nanoTime();
             List<Tag> tags = tagger.tag(text);
-            respond(ex, 200, "application/json", toJson(tags));
+            long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+            respond(ex, 200, "application/json", toJson(text, tags, elapsedMs));
         }
 
         /** GET /health */
@@ -584,24 +586,35 @@ public class App {
                     .replace("\\t",  "\t");
         }
 
-        /** Serialize a list of Tags to a JSON array. */
-        private static String toJson(List<Tag> tags) {
-            if (tags.isEmpty()) return "[]";
-            StringBuilder sb = new StringBuilder("[\n");
-            for (int i = 0; i < tags.size(); i++) {
-                Tag t = tags.get(i);
-                sb.append("  {")
-                  .append("\"start\":").append(t.start()).append(',')
-                  .append("\"end\":").append(t.end()).append(',')
-                  .append("\"surface\":\"").append(jsonEscape(t.surface())).append("\",")
-                  .append("\"id\":\"").append(jsonEscape(t.id())).append("\",")
-                  .append("\"type\":\"").append(jsonEscape(t.type())).append("\",")
-                  .append("\"output\":\"").append(jsonEscape(t.output())).append("\"")
-                  .append('}');
-                if (i < tags.size() - 1) sb.append(',');
-                sb.append('\n');
+        /** Serialize a tag response into the standard envelope. */
+        private static String toJson(String text, List<Tag> tags, long elapsedMs) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("{\n")
+              .append("  \"totaltime\": ").append(elapsedMs).append(",\n")
+              .append("  \"text\": \"").append(jsonEscape(text)).append("\",\n")
+              .append("  \"docs\": ");
+
+            if (tags.isEmpty()) {
+                sb.append("[]");
+            } else {
+                sb.append("[\n");
+                for (int i = 0; i < tags.size(); i++) {
+                    Tag t = tags.get(i);
+                    sb.append("    {")
+                      .append("\"start\":").append(t.start()).append(',')
+                      .append("\"end\":").append(t.end()).append(',')
+                      .append("\"surface\":\"").append(jsonEscape(t.surface())).append("\",")
+                      .append("\"id\":\"").append(jsonEscape(t.id())).append("\",")
+                      .append("\"type\":\"").append(jsonEscape(t.type())).append("\",")
+                      .append("\"output\":\"").append(jsonEscape(t.output())).append("\"")
+                      .append('}');
+                    if (i < tags.size() - 1) sb.append(',');
+                    sb.append('\n');
+                }
+                sb.append("  ]");
             }
-            return sb.append(']').toString();
+
+            return sb.append("\n}").toString();
         }
 
         /** Escape a string for safe embedding inside a JSON double-quoted value. */
