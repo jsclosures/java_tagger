@@ -6,6 +6,7 @@ import org.apache.lucene.analysis.Tokenizer;
 import org.apache.lucene.analysis.core.LowerCaseFilter;
 import org.apache.lucene.analysis.miscellaneous.ASCIIFoldingFilter;
 import org.apache.lucene.analysis.miscellaneous.ConcatenateGraphFilter;
+import org.apache.lucene.analysis.pattern.PatternReplaceCharFilter;
 import org.apache.lucene.analysis.standard.StandardTokenizer;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.lucene.analysis.tokenattributes.OffsetAttribute;
@@ -29,6 +30,7 @@ import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.Reader;
 import java.io.StringReader;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
@@ -65,10 +67,34 @@ public class App {
     // ── Analyzer ─────────────────────────────────────────────────────────────
     // Must be IDENTICAL at index time and at tag time — otherwise FST keys
     // won't align with tag-time tokens.
-    // Chain: split on whitespace/punctuation → lowercase → fold accents.
+    //
+    // Full chain (applied in order):
+    //   1. PatternReplaceCharFilter — strips hyphens/dashes from the raw char
+    //      stream before the tokenizer sees it, so "part-no" and "partno" both
+    //      become the single token "partno".  Using a CharFilter (not a
+    //      TokenFilter) preserves the original character offsets so that
+    //      Tag.surface() still references the correct span in the input text.
+    //   2. StandardTokenizer — splits on whitespace and non-alphanumeric
+    //      boundaries (after hyphens have already been removed).
+    //   3. LowerCaseFilter — folds to lowercase for case-insensitive matching.
+    //   4. ASCIIFoldingFilter — folds accented characters ("Zürich" → "zurich").
+    //
     // No stemming — it breaks exact phrase matching.
+
+    /** Regex that matches the ASCII hyphen-minus and common Unicode dash characters. */
+    private static final Pattern HYPHEN_PATTERN =
+        Pattern.compile("[\\u002D\\u2010\\u2011\\u2012\\u2013\\u2014\\u2212]");
+
     static Analyzer buildAnalyzer() {
         return new Analyzer() {
+            @Override
+            protected Reader initReader(String fieldName, Reader reader) {
+                // Strip all hyphens/dashes before the tokenizer runs.
+                // Replacement is "" (empty) so "sw-lucene" → "swlucene" (one token),
+                // not "sw lucene" (two tokens).
+                return new PatternReplaceCharFilter(HYPHEN_PATTERN, "", reader);
+            }
+
             @Override
             protected TokenStreamComponents createComponents(String field) {
                 Tokenizer   t = new StandardTokenizer();
