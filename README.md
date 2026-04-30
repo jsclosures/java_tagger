@@ -1,7 +1,38 @@
-# Lucene Text Tagger — Java CLI Demo
+# Java FST Guard Rails
 
-A single-file Java demo covering every aspect of phrase-based text tagging
-with **Apache Lucene 9.10** — no Solr required.
+A high-performance, dictionary-driven text scanning library built on the
+**Apache Lucene 9.10 FST (Finite State Transducer)** — no Solr, no ML model,
+no GPU required.
+
+Load your phrase dictionaries at startup and the FST walks input text in a
+single linear pass, matching millions of tokens per second on commodity
+hardware.  Use it as a **guard rails layer** in front of any LLM or search
+pipeline to catch — and canonicalize — entities, intents, offensive language,
+product names, machine families, and anything else you can put in a CSV.
+
+## Use cases
+
+| Dictionary | What it catches | Example output |
+|---|---|---|
+| `intent.csv` | User intent phrases | `"track my order"` → `STATUS` |
+| `offensive_en.csv` | Banned / offensive language | `"bullshit"` → `BULLSHIT` |
+| `machine_families.csv` | Equipment family names | `"backhoe loader"` → `BACKHOELOADER` |
+| `product.csv` | Product / SKU names | `"Apache Lucene"` → `APACHELUCENE` |
+| your own CSVs | Entities, topics, codes … | anything you define |
+
+Every match returns the **surface text**, its **character offsets**, a **type**
+label (from the filename), a **canonical id**, and a normalized **output**
+token — ready to route, filter, or log without any downstream NLP.
+
+## Why FST
+
+- **Sub-millisecond latency** — one forward arc-walk per input token, no
+  regex backtracking, no hash lookups per phrase candidate
+- **Compact memory** — a 168-entry intent dictionary fits in < 33 KB of RAM
+- **Exact match** — no false positives from embeddings or fuzzy search
+- **Analyzer-aware** — ASCII folding and hyphen normalization are baked in,
+  so `"Zürich"` matches `"Zurich"` and `"xx-yy"` matches `"xxyy"`
+- **Zero runtime dependencies** — ships as a single fat JAR (~12 MB)
 
 ## Requirements
 
@@ -30,8 +61,8 @@ Port defaults to `8080`, overridden by the `PORT` env var or a positional argume
 
 | Method | Path | Input | Output |
 |--------|------|-------|--------|
-| GET | `/tag?text=Ada+Lovelace+loves+Lucene` | URL-encoded text | JSON array of tags |
-| POST | `/tag` | `{"text":"Ada Lovelace loves Lucene"}` | JSON array of tags |
+| GET | `/tag?text=Ada+Lovelace+loves+Lucene` | URL-encoded text | `{totaltime, text, docs:[]}` |
+| POST | `/tag` | `{"text":"Ada Lovelace loves Lucene"}` | `{totaltime, text, docs:[]}` |
 | GET | `/health` | — | `{"status":"ok"}` |
 
 **Example responses:**
@@ -41,25 +72,33 @@ curl "http://localhost:8080/tag?text=Ada+Lovelace+uses+Apache+Lucene+in+New+York
 ```
 
 ```json
-[
-  {"start":0,"end":12,"surface":"Ada Lovelace","id":"per:ada","type":"PERSON"},
-  {"start":18,"end":31,"surface":"Apache Lucene","id":"sw:lucene","type":"PRODUCT"},
-  {"start":35,"end":48,"surface":"New York City","id":"geo:nyc","type":"CITY"}
-]
+{
+  "totaltime": 1,
+  "text": "Ada Lovelace uses Apache Lucene in New York City",
+  "docs": [
+    {"start":0, "end":12, "surface":"Ada Lovelace",  "id":"per:ada",   "type":"PERSON",  "output":"ADALOVELACE"},
+    {"start":18,"end":31, "surface":"Apache Lucene",  "id":"sw:lucene", "type":"PRODUCT", "output":"APACHELUCENE"},
+    {"start":35,"end":48, "surface":"New York City",  "id":"geo:nyc",   "type":"CITY",    "output":"NEWYORKCITY"}
+  ]
+}
 ```
 
 ```bash
-curl -X POST http://localhost:8080/tag \
+# Guard-rails use case: detect offensive language
+DATA=data curl -s -X POST http://localhost:8080/tag \
      -H "Content-Type: application/json" \
-     -d '{"text":"Google and Microsoft operate in the United States"}'
+     -d '{"text":"that was total bullshit and I want to track my order"}'
 ```
 
 ```json
-[
-  {"start":0,"end":6,"surface":"Google","id":"org:goog","type":"ORG"},
-  {"start":11,"end":20,"surface":"Microsoft","id":"org:msft","type":"ORG"},
-  {"start":36,"end":49,"surface":"United States","id":"cnt:us","type":"COUNTRY"}
-]
+{
+  "totaltime": 1,
+  "text": "that was total bullshit and I want to track my order",
+  "docs": [
+    {"start":15,"end":23,"surface":"bullshit",       "id":"<uuid>","type":"offensive_en","output":"BULLSHIT"},
+    {"start":38,"end":52,"surface":"track my order", "id":"<uuid>","type":"intent",      "output":"STATUS"}
+  ]
+}
 ```
 
 ### Full demo — all guide sections in one pass
@@ -97,6 +136,69 @@ java -jar target/tagger.jar repl
 ```
 
 Type sentences at the `>` prompt. Commands: `dict`, `help`, `quit`.
+
+### MCP server (Model Context Protocol)
+
+```bash
+java -jar target/tagger.jar mcp
+```
+
+Exposes the tagger as a single MCP tool called `tag` over the stdio transport
+(newline-delimited JSON-RPC 2.0 on stdin/stdout). All startup diagnostics go to
+stderr so the protocol channel stays clean.
+
+#### Claude Desktop setup
+
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "lucene-tagger": {
+      "command": "java",
+      "args": ["-jar", "/absolute/path/to/tagger.jar", "mcp"],
+      "env": {
+        "DATA": "/absolute/path/to/data"
+      }
+    }
+  }
+}
+```
+
+Claude Desktop restarts the process automatically on reconnect. Once connected,
+Claude can call the `tag` tool directly:
+
+> *"Tag this sentence: Ada Lovelace uses Apache Lucene in New York City"*
+
+#### Tool schema
+
+| Field | Value |
+|---|---|
+| Tool name | `tag` |
+| Input | `{ "text": "<string>" }` |
+| Output | envelope JSON (see Tag response format below) |
+
+#### Manual test with netcat / shell
+
+```bash
+# Send a full MCP conversation on stdin
+{
+  echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test"}}}'
+  echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+  echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tag","arguments":{"text":"Ada Lovelace uses Apache Lucene"}}}'
+} | java -jar target/tagger.jar mcp 2>/dev/null
+```
+
+#### MCP protocol messages handled
+
+| Method | Reply |
+|---|---|
+| `initialize` | Server capabilities + protocol version |
+| `notifications/initialized` | *(none — notification)* |
+| `tools/list` | `tag` tool schema |
+| `tools/call` | Tag envelope as `content[].text` |
+| anything else | JSON-RPC `-32601` method-not-found error |
 
 ## Docker
 
@@ -202,10 +304,14 @@ curl -s "http://localhost:8080/tag?text=I+want+to+track+my+order+and+check+avail
 ```
 
 ```json
-[
-  {"start":10,"end":24,"surface":"track my order","id":"<uuid>","type":"intent","output":"STATUS"},
-  {"start":29,"end":47,"surface":"check availability","id":"<uuid>","type":"intent","output":"AVAILABILITY"}
-]
+{
+  "totaltime": 1,
+  "text": "I want to track my order and check availability",
+  "docs": [
+    {"start":10,"end":24,"surface":"track my order",     "id":"<uuid>","type":"intent","output":"STATUS"},
+    {"start":29,"end":47,"surface":"check availability", "id":"<uuid>","type":"intent","output":"AVAILABILITY"}
+  ]
+}
 ```
 
 ### Error handling
@@ -233,4 +339,5 @@ Everything lives in one file using nested static classes:
 | `buildTagger()` | Orchestrates steps 1-3 for server mode |
 | `TextTagger` | FST-backed phrase dictionary; forward-maximum-match arc walk |
 | `TaggerServer` | `com.sun.net.httpserver` HTTP wrapper; GET+POST `/tag`, `/health` |
-| `App.main()` | Entry point: demo mode (default) or server mode (`serve`) |
+| `McpServer` | MCP stdio server (JSON-RPC 2.0); exposes `tag` tool to Claude Desktop |
+| `App.main()` | Entry point: `mcp`, `serve`, `repl`, or demo mode |

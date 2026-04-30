@@ -28,8 +28,11 @@ import org.apache.lucene.util.fst.FSTCompiler;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.PrintStream;
 import java.io.Reader;
 import java.io.StringReader;
 import java.net.InetSocketAddress;
@@ -475,6 +478,45 @@ public class App {
     // TaggerServer  —  com.sun.net.httpserver HTTP wrapper
     // ═════════════════════════════════════════════════════════════════════════
 
+    // ── Shared JSON helpers (used by TaggerServer and McpServer) ─────────────
+
+    /** Escape a string for safe embedding inside a JSON double-quoted value. */
+    static String jsonEscape(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
+    }
+
+    /** Serialize a tag result into the standard response envelope. */
+    static String toJson(String text, List<Tag> tags, long elapsedMs) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n")
+          .append("  \"totaltime\": ").append(elapsedMs).append(",\n")
+          .append("  \"text\": \"").append(jsonEscape(text)).append("\",\n")
+          .append("  \"docs\": ");
+
+        if (tags.isEmpty()) {
+            sb.append("[]");
+        } else {
+            sb.append("[\n");
+            for (int i = 0; i < tags.size(); i++) {
+                Tag t = tags.get(i);
+                sb.append("    {")
+                  .append("\"start\":").append(t.start()).append(',')
+                  .append("\"end\":").append(t.end()).append(',')
+                  .append("\"surface\":\"").append(jsonEscape(t.surface())).append("\",")
+                  .append("\"id\":\"").append(jsonEscape(t.id())).append("\",")
+                  .append("\"type\":\"").append(jsonEscape(t.type())).append("\",")
+                  .append("\"output\":\"").append(jsonEscape(t.output())).append("\"")
+                  .append('}');
+                if (i < tags.size() - 1) sb.append(',');
+                sb.append('\n');
+            }
+            sb.append("  ]");
+        }
+
+        return sb.append("\n}").toString();
+    }
+
     /**
      * Minimal HTTP server built on the JDK's built-in com.sun.net.httpserver API.
      *
@@ -584,43 +626,6 @@ public class App {
                     .replace("\\n",  "\n")
                     .replace("\\r",  "\r")
                     .replace("\\t",  "\t");
-        }
-
-        /** Serialize a tag response into the standard envelope. */
-        private static String toJson(String text, List<Tag> tags, long elapsedMs) {
-            StringBuilder sb = new StringBuilder();
-            sb.append("{\n")
-              .append("  \"totaltime\": ").append(elapsedMs).append(",\n")
-              .append("  \"text\": \"").append(jsonEscape(text)).append("\",\n")
-              .append("  \"docs\": ");
-
-            if (tags.isEmpty()) {
-                sb.append("[]");
-            } else {
-                sb.append("[\n");
-                for (int i = 0; i < tags.size(); i++) {
-                    Tag t = tags.get(i);
-                    sb.append("    {")
-                      .append("\"start\":").append(t.start()).append(',')
-                      .append("\"end\":").append(t.end()).append(',')
-                      .append("\"surface\":\"").append(jsonEscape(t.surface())).append("\",")
-                      .append("\"id\":\"").append(jsonEscape(t.id())).append("\",")
-                      .append("\"type\":\"").append(jsonEscape(t.type())).append("\",")
-                      .append("\"output\":\"").append(jsonEscape(t.output())).append("\"")
-                      .append('}');
-                    if (i < tags.size() - 1) sb.append(',');
-                    sb.append('\n');
-                }
-                sb.append("  ]");
-            }
-
-            return sb.append("\n}").toString();
-        }
-
-        /** Escape a string for safe embedding inside a JSON double-quoted value. */
-        private static String jsonEscape(String s) {
-            return s.replace("\\", "\\\\").replace("\"", "\\\"")
-                    .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
         }
 
         /** Write a complete HTTP response and close the exchange. */
@@ -797,14 +802,210 @@ public class App {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    // McpServer  —  Model Context Protocol server (stdio transport)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * MCP server that exposes the tagger as a single tool called {@code tag}.
+     *
+     * <p>Transport: stdio (newline-delimited JSON-RPC 2.0 on stdin/stdout).
+     * All diagnostic output goes to stderr so stdout carries only protocol frames.
+     *
+     * <p>Supported methods:
+     * <ul>
+     *   <li>{@code initialize}                — capability handshake</li>
+     *   <li>{@code notifications/initialized} — client ready notification (no reply)</li>
+     *   <li>{@code tools/list}                — returns the {@code tag} tool schema</li>
+     *   <li>{@code tools/call}                — runs the tagger, returns envelope JSON</li>
+     * </ul>
+     *
+     * <p>Usage: {@code java -jar tagger.jar mcp}
+     */
+    static class McpServer {
+
+        private static final Pattern P_METHOD =
+            Pattern.compile("\"method\"\\s*:\\s*\"([^\"]+)\"");
+        private static final Pattern P_ID =
+            Pattern.compile("\"id\"\\s*:\\s*(-?\\d+|\"[^\"]*\"|null)");
+        private static final Pattern P_TOOL_NAME =
+            Pattern.compile("\"name\"\\s*:\\s*\"([^\"]+)\"");
+        private static final Pattern P_TEXT_ARG =
+            Pattern.compile("\"text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+
+        private static final String PROTOCOL_VERSION = "2024-11-05";
+        private static final String SERVER_NAME      = "lucene-tagger";
+        private static final String SERVER_VERSION   = "1.0";
+
+        private final TextTagger tagger;
+        private final PrintStream out;
+
+        McpServer(TextTagger tagger) {
+            this.tagger = tagger;
+            this.out    = System.out;   // capture before anything might reassign it
+        }
+
+        /** Block on stdin, dispatching each newline-delimited JSON-RPC message. */
+        void run() throws Exception {
+            System.err.println("[mcp] Ready — listening on stdin");
+            BufferedReader in = new BufferedReader(
+                new InputStreamReader(System.in, StandardCharsets.UTF_8));
+            String line;
+            while ((line = in.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) continue;
+                try {
+                    dispatch(line);
+                } catch (Exception e) {
+                    System.err.println("[mcp] error: " + e.getMessage());
+                }
+            }
+        }
+
+        private void dispatch(String json) throws Exception {
+            Matcher mMethod = P_METHOD.matcher(json);
+            if (!mMethod.find()) return;     // not a valid JSON-RPC frame
+            String method = mMethod.group(1);
+            String rawId  = extractRawId(json);
+
+            switch (method) {
+                case "initialize"                -> handleInitialize(rawId);
+                case "notifications/initialized" -> { /* notification — no reply */ }
+                case "tools/list"                -> handleToolsList(rawId);
+                case "tools/call"                -> handleToolsCall(rawId, json);
+                default                          ->
+                    sendError(rawId, -32601, "Method not found: " + method);
+            }
+        }
+
+        // ── Method handlers ───────────────────────────────────────────────────
+
+        private void handleInitialize(String rawId) {
+            send("{" +
+                "\"jsonrpc\":\"2.0\"," +
+                "\"id\":" + rawId + "," +
+                "\"result\":{" +
+                    "\"protocolVersion\":\"" + PROTOCOL_VERSION + "\"," +
+                    "\"capabilities\":{\"tools\":{}}," +
+                    "\"serverInfo\":{" +
+                        "\"name\":\"" + SERVER_NAME + "\"," +
+                        "\"version\":\"" + SERVER_VERSION + "\"" +
+                    "}" +
+                "}" +
+            "}");
+        }
+
+        private void handleToolsList(String rawId) {
+            send("{" +
+                "\"jsonrpc\":\"2.0\"," +
+                "\"id\":" + rawId + "," +
+                "\"result\":{\"tools\":[{" +
+                    "\"name\":\"tag\"," +
+                    "\"description\":\"Tag phrases in text using a Lucene FST phrase " +
+                        "dictionary. Returns matched spans with character offsets, " +
+                        "phrase type, canonical id, and output token.\"," +
+                    "\"inputSchema\":{" +
+                        "\"type\":\"object\"," +
+                        "\"properties\":{" +
+                            "\"text\":{" +
+                                "\"type\":\"string\"," +
+                                "\"description\":\"The text to tag\"" +
+                            "}" +
+                        "}," +
+                        "\"required\":[\"text\"]" +
+                    "}" +
+                "}]}" +
+            "}");
+        }
+
+        private void handleToolsCall(String rawId, String json) throws Exception {
+            // Validate tool name
+            Matcher mName = P_TOOL_NAME.matcher(json);
+            if (!mName.find() || !"tag".equals(mName.group(1))) {
+                sendError(rawId, -32602, "Unknown tool (only 'tag' is available)");
+                return;
+            }
+
+            // Extract and unescape the text argument
+            Matcher mText = P_TEXT_ARG.matcher(json);
+            if (!mText.find()) {
+                sendError(rawId, -32602, "Missing required argument: text");
+                return;
+            }
+            String text = unescapeJson(mText.group(1));
+
+            // Run tagger and build envelope
+            long      start     = System.nanoTime();
+            List<Tag> tags      = tagger.tag(text);
+            long      elapsedMs = (System.nanoTime() - start) / 1_000_000;
+            String    envelope  = toJson(text, tags, elapsedMs);
+
+            // Embed envelope as an escaped string inside the MCP content frame
+            send("{" +
+                "\"jsonrpc\":\"2.0\"," +
+                "\"id\":" + rawId + "," +
+                "\"result\":{\"content\":[{" +
+                    "\"type\":\"text\"," +
+                    "\"text\":\"" + jsonEscape(envelope) + "\"" +
+                "}]}" +
+            "}");
+        }
+
+        // ── Helpers ───────────────────────────────────────────────────────────
+
+        private void sendError(String rawId, int code, String message) {
+            send("{" +
+                "\"jsonrpc\":\"2.0\"," +
+                "\"id\":" + (rawId != null ? rawId : "null") + "," +
+                "\"error\":{\"code\":" + code + ",\"message\":\"" +
+                    jsonEscape(message) + "\"}" +
+            "}");
+        }
+
+        /** Extract the raw {@code id} token from a JSON-RPC frame (number, string, or null). */
+        private static String extractRawId(String json) {
+            Matcher m = P_ID.matcher(json);
+            return m.find() ? m.group(1) : "null";
+        }
+
+        /** Unescape basic JSON escape sequences in a captured string value. */
+        private static String unescapeJson(String s) {
+            return s.replace("\\\"", "\"")
+                    .replace("\\\\", "\\")
+                    .replace("\\n",  "\n")
+                    .replace("\\r",  "\r")
+                    .replace("\\t",  "\t");
+        }
+
+        private void send(String json) {
+            out.println(json);
+            out.flush();
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     // Main
     // ═════════════════════════════════════════════════════════════════════════
 
     public static void main(String[] args) throws Exception {
 
-        boolean serveMode = args.length > 0 && args[0].equals("serve");
+        boolean mcpMode   = args.length > 0 && "mcp".equals(args[0]);
+        boolean serveMode = args.length > 0 && "serve".equals(args[0]);
 
-        if (serveMode) {
+        if (mcpMode) {
+            // ── MCP stdio server mode ────────────────────────────────────────
+            // Redirect stdout to stderr during tagger build so the protocol
+            // channel (stdout) carries only JSON-RPC frames.
+            PrintStream realOut = System.out;
+            System.setOut(System.err);
+
+            System.err.println("[mcp] Building tagger ...");
+            Analyzer   analyzer = buildAnalyzer();
+            TextTagger tagger   = buildTagger(analyzer);
+
+            System.setOut(realOut);          // restore protocol channel
+            new McpServer(tagger).run();
+
+        } else if (serveMode) {
             // ── HTTP server mode ─────────────────────────────────────────────
             // Port: first try command-line arg, then PORT env var, then default 8080
             int port = 8080;
